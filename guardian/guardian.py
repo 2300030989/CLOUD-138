@@ -1,21 +1,23 @@
 import time
 from datetime import datetime
+from pathlib import Path
 
 import yaml
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 
-CONFIG_FILE = "guardian/config.yaml"
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "config.yaml"
 
 
-def load_guardian_config():
-    with open(CONFIG_FILE, "r") as file:
-        config_data = yaml.safe_load(file)
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
 
-    namespace = config_data["namespace"]
-    workload = config_data["workload"]
-    interval = int(config_data["check_interval"])
+    namespace = cfg.get("namespace", "edge-lab")
+    workload = cfg.get("workload", "edge-workload")
+    interval = int(cfg.get("check_interval", 5))
 
     return namespace, workload, interval
 
@@ -25,24 +27,18 @@ def load_kubernetes_config():
 
 
 def check_api(core_api):
-    """
-    Check authenticated Kubernetes API availability.
-    """
     try:
         core_api.list_namespace(_request_timeout=3)
-        return True
+        return True, "API reachable"
 
-    except Exception:
-        return False
+    except Exception as e:
+        return False, str(e)
 
 
-def check_workload(apps_api, namespace, workload):
-    """
-    Check Deployment health.
-    """
+def check_workload(apps_api, namespace, workload_name):
     try:
         deployment = apps_api.read_namespaced_deployment(
-            name=workload,
+            name=workload_name,
             namespace=namespace,
         )
 
@@ -63,11 +59,8 @@ def check_workload(apps_api, namespace, workload):
 
 
 def check_nodes(core_api):
-    """
-    Read Kubernetes node readiness.
-    """
     try:
-        nodes = core_api.list_node(_request_timeout=3)
+        nodes = core_api.list_node()
 
         states = {}
 
@@ -84,30 +77,35 @@ def check_nodes(core_api):
 
         return states
 
-    except Exception:
+    except ApiException:
         return {}
 
 
 def classify_state(api_healthy, workload_healthy, nodes):
-    """
-    Determine overall Guardian state.
-    """
 
-    if not api_healthy:
+    not_ready_nodes = [
+        name for name, ready in nodes.items()
+        if not ready
+    ]
+
+    if api_healthy and workload_healthy and not not_ready_nodes:
+        return "NORMAL"
+
+    if not api_healthy and workload_healthy:
         return "DEGRADED"
+
+    if api_healthy and workload_healthy and not_ready_nodes:
+        return "NODE_DEGRADED"
 
     if not workload_healthy:
         return "WORKLOAD_FAILURE"
 
-    if nodes and not all(nodes.values()):
-        return "NODE_DEGRADED"
-
-    return "NORMAL"
+    return "UNKNOWN"
 
 
 def main():
 
-    namespace, workload, interval = load_guardian_config()
+    namespace, workload_name, check_interval = load_config()
 
     print("======================================")
     print("      CLOUD-138 EDGE GUARDIAN")
@@ -119,9 +117,10 @@ def main():
     core_api = client.CoreV1Api()
     apps_api = client.AppsV1Api()
 
+    print(f"Config    : {CONFIG_FILE}")
     print(f"Namespace : {namespace}")
-    print(f"Workload  : {workload}")
-    print(f"Interval  : {interval} seconds")
+    print(f"Workload  : {workload_name}")
+    print(f"Interval  : {check_interval} seconds")
     print()
     print("Guardian started in READ-ONLY mode.")
     print()
@@ -130,12 +129,12 @@ def main():
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        api_healthy = check_api(core_api)
+        api_healthy, api_message = check_api(core_api)
 
         workload_healthy, desired, ready, available = check_workload(
             apps_api,
             namespace,
-            workload,
+            workload_name,
         )
 
         nodes = check_nodes(core_api)
@@ -164,11 +163,7 @@ def main():
 
         for node_name, node_ready in nodes.items():
 
-            status = (
-                "Ready"
-                if node_ready
-                else "NotReady"
-            )
+            status = "Ready" if node_ready else "NotReady"
 
             print(
                 f"    Node: {node_name} -> {status}"
@@ -176,7 +171,7 @@ def main():
 
         print()
 
-        time.sleep(interval)
+        time.sleep(check_interval)
 
 
 if __name__ == "__main__":

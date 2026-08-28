@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: edge-probe
+  namespace: edge-lab
+  labels:
+    app: edge-probe
+spec:
+  nodeName: k3d-cloud138-agent-0
+  containers:
+    - name: probe
+      image: python:3.12-alpine
+      command:
+        - python
+        - -c
+        - |
+          import socket
+          import time
+          from datetime import datetime
+
+          HOST = "kubernetes.default.svc"
+          PORT = 443
+
+          print("======================================")
+          print("      CLOUD-138 EDGE PROBE")
+          print("======================================")
+          print(f"API Host : {HOST}")
+          print(f"API Port : {PORT}")
+          print("")
+
+          while True:
+              timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+              try:
+                  start = time.time()
+
+                  with socket.create_connection(
+                      (HOST, PORT),
+                      timeout=3
+                  ):
+                      elapsed = time.time() - start
+
+                  print(
+                      f"[{timestamp}] "
+                      f"API_REACHABLE | "
+                      f"CONNECT_TIME={elapsed:.4f}s",
+                      flush=True
+                  )
+
+              except Exception as e:
+                  print(
+                      f"[{timestamp}] "
+                      f"API_UNREACHABLE | "
+                      f"ERROR={e}",
+                      flush=True
+                  )
+
+              time.sleep(5)
