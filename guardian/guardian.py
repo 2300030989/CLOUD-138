@@ -1,7 +1,9 @@
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
+import docker
 import yaml
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -10,10 +12,18 @@ from kubernetes.client.rest import ApiException
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
 
+DETECTOR_DIR = BASE_DIR / "detector"
+
+if str(DETECTOR_DIR) not in sys.path:
+    sys.path.insert(0, str(DETECTOR_DIR))
+
+from detector import classify_node
+from evidence import collect_node_evidence
+
 
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
 
     namespace = cfg.get("namespace", "edge-lab")
     workload = cfg.get("workload", "edge-workload")
@@ -28,14 +38,21 @@ def load_kubernetes_config():
 
 def check_api(core_api):
     try:
-        core_api.list_namespace(_request_timeout=3)
+        core_api.list_namespace(
+            _request_timeout=3
+        )
+
         return True, "API reachable"
 
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:
+        return False, str(exc)
 
 
-def check_workload(apps_api, namespace, workload_name):
+def check_workload(
+    apps_api,
+    namespace,
+    workload_name,
+):
     try:
         deployment = apps_api.read_namespaced_deployment(
             name=workload_name,
@@ -58,49 +75,46 @@ def check_workload(apps_api, namespace, workload_name):
         return False, 0, 0, 0
 
 
-def check_nodes(core_api):
-    try:
-        nodes = core_api.list_node()
+def get_workload_nodes(
+    core_api,
+    namespace,
+    workload_name,
+):
+    """
+    Identify the Kubernetes nodes currently hosting
+    running replicas of the configured workload.
+    """
 
-        states = {}
+    apps_api = client.AppsV1Api()
 
-        for node in nodes.items:
-            name = node.metadata.name
-            ready = False
+    deployment = apps_api.read_namespaced_deployment(
+        name=workload_name,
+        namespace=namespace,
+    )
 
-            for condition in node.status.conditions or []:
-                if condition.type == "Ready":
-                    ready = condition.status == "True"
-                    break
+    selector = deployment.spec.selector.match_labels
 
-            states[name] = ready
+    label_selector = ",".join(
+        f"{key}={value}"
+        for key, value in selector.items()
+    )
 
-        return states
+    pods = core_api.list_namespaced_pod(
+        namespace=namespace,
+        label_selector=label_selector,
+    )
 
-    except ApiException:
-        return {}
+    workload_nodes = set()
 
+    for pod in pods.items:
 
-def classify_state(api_healthy, workload_healthy, nodes):
+        if pod.status.phase == "Running":
+            if pod.spec.node_name:
+                workload_nodes.add(
+                    pod.spec.node_name
+                )
 
-    not_ready_nodes = [
-        name for name, ready in nodes.items()
-        if not ready
-    ]
-
-    if api_healthy and workload_healthy and not not_ready_nodes:
-        return "NORMAL"
-
-    if not api_healthy and workload_healthy:
-        return "DEGRADED"
-
-    if api_healthy and workload_healthy and not_ready_nodes:
-        return "NODE_DEGRADED"
-
-    if not workload_healthy:
-        return "WORKLOAD_FAILURE"
-
-    return "UNKNOWN"
+    return workload_nodes
 
 
 def main():
@@ -108,7 +122,7 @@ def main():
     namespace, workload_name, check_interval = load_config()
 
     print("======================================")
-    print("      CLOUD-138 EDGE GUARDIAN")
+    print("      CLOUD-138 EDGE GUARDIAN v4")
     print("======================================")
     print()
 
@@ -117,35 +131,70 @@ def main():
     core_api = client.CoreV1Api()
     apps_api = client.AppsV1Api()
 
+    docker_client = docker.from_env()
+
     print(f"Config    : {CONFIG_FILE}")
     print(f"Namespace : {namespace}")
     print(f"Workload  : {workload_name}")
     print(f"Interval  : {check_interval} seconds")
     print()
-    print("Guardian started in READ-ONLY mode.")
+    print(
+        "Guardian started in READ-ONLY mode."
+    )
     print()
 
     while True:
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
 
-        api_healthy, api_message = check_api(core_api)
+        # -------------------------------------------------
+        # Kubernetes API
+        # -------------------------------------------------
 
-        workload_healthy, desired, ready, available = check_workload(
+        api_healthy, api_message = check_api(
+            core_api
+        )
+
+        # -------------------------------------------------
+        # Workload
+        # -------------------------------------------------
+
+        (
+            workload_healthy,
+            desired,
+            ready,
+            available,
+        ) = check_workload(
             apps_api,
             namespace,
             workload_name,
         )
 
-        nodes = check_nodes(core_api)
+        # -------------------------------------------------
+        # Workload placement
+        # -------------------------------------------------
 
-        state = classify_state(
-            api_healthy,
-            workload_healthy,
-            nodes,
+        try:
+            workload_nodes = get_workload_nodes(
+                core_api,
+                namespace,
+                workload_name,
+            )
+
+        except Exception:
+            workload_nodes = set()
+
+        # -------------------------------------------------
+        # Overall status
+        # -------------------------------------------------
+
+        api_status = (
+            "HEALTHY"
+            if api_healthy
+            else "UNREACHABLE"
         )
-
-        api_status = "HEALTHY" if api_healthy else "UNREACHABLE"
 
         workload_status = (
             "HEALTHY"
@@ -157,16 +206,88 @@ def main():
             f"[{timestamp}] "
             f"API={api_status} | "
             f"WORKLOAD={workload_status} "
-            f"({ready}/{desired}) | "
-            f"STATE={state}"
+            f"({ready}/{desired})"
         )
 
-        for node_name, node_ready in nodes.items():
+        print(
+            f"    Available replicas: "
+            f"{available}/{desired}"
+        )
 
-            status = "Ready" if node_ready else "NotReady"
+        print(
+            "    Workload nodes: "
+            f"{', '.join(sorted(workload_nodes)) or 'None'}"
+        )
+
+        # -------------------------------------------------
+        # Real node evidence + classification
+        # -------------------------------------------------
+
+        try:
+            nodes = core_api.list_node()
+
+            for node in nodes.items:
+
+                evidence = collect_node_evidence(
+                    core_api,
+                    docker_client,
+                    node,
+                )
+
+                result = classify_node(
+                    node_name=evidence.node_name,
+                    node_ready=evidence.node_ready,
+                    docker_running=evidence.runtime_running,
+                    k3s_process_alive=(
+                        evidence.k3s_process_alive
+                    ),
+                    workload_on_node=(
+                        evidence.node_name
+                        in workload_nodes
+                    ),
+                    workload_healthy=workload_healthy,
+                )
+
+                print(
+                    f"    Node: {result.node}"
+                )
+
+                print(
+                    f"        CONDITION="
+                    f"{result.condition.value} "
+                    f"| CONFIDENCE="
+                    f"{result.confidence}%"
+                )
+
+                print(
+                    f"        K8s Ready      : "
+                    f"{evidence.node_ready}"
+                )
+
+                print(
+                    f"        Docker Runtime: "
+                    f"{evidence.runtime_status}"
+                )
+
+                print(
+                    f"        K3s Process   : "
+                    f"{evidence.k3s_process_alive}"
+                )
+
+                print(
+                    f"        Workload      : "
+                    f"{evidence.node_name in workload_nodes}"
+                )
+
+                print(
+                    f"        Reason        : "
+                    f"{result.reason}"
+                )
+
+        except Exception as exc:
 
             print(
-                f"    Node: {node_name} -> {status}"
+                f"    NODE_EVIDENCE_ERROR: {exc}"
             )
 
         print()
