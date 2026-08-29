@@ -1,3 +1,11 @@
 namespace: edge-lab
 workload: edge-workload
+
 check_interval: 5
+
+execution_mode: DRY_RUN
+max_recovery_attempts: 2
+
+recovery:
+  wait_after_execution: 10
+  verification_timeout: 60

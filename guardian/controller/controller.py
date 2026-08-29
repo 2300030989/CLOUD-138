@@ -1,20 +1,13 @@
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-import sys
-from pathlib import Path
 
-GUARDIAN_DIR = Path(__file__).resolve().parent.parent
-
-if str(GUARDIAN_DIR) not in sys.path:
-    sys.path.insert(0, str(GUARDIAN_DIR))
-    
-from detector.evidence import collect_node_evidence
-from detector.detector import classify_node
+import yaml
 
 
 # ---------------------------------------------------------
-# Make guardian/recovery modules importable
+# Make guardian/ modules importable
 # ---------------------------------------------------------
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -24,29 +17,58 @@ if str(GUARDIAN_DIR) not in sys.path:
     sys.path.insert(0, str(GUARDIAN_DIR))
 
 
+from detector.evidence import collect_node_evidence
+from detector.detector import classify_node
+
 from recovery.audit import AuditLogger
+
 from recovery.executor import (
     ExecutionMode,
+    ExecutionStatus,
     RecoveryExecutor,
 )
+
 from recovery.policy import (
     RecoveryAction,
     decide_recovery,
 )
 
+from recovery.verify import verify_recovery
+
+
+# ---------------------------------------------------------
+# Controller result
+# ---------------------------------------------------------
 
 @dataclass
 class ControllerResult:
+
     node: str
+
     condition: str
+
     confidence: int
+
     workload_healthy: bool
+
     previous_attempts: int
+
     current_attempt: int
+
     decision: str
+
     execution_status: str
+
+    verification_status: str
+
+    final_state: str
+
     message: str
 
+
+# ---------------------------------------------------------
+# Recovery Controller
+# ---------------------------------------------------------
 
 class RecoveryController:
 
@@ -57,22 +79,90 @@ class RecoveryController:
         max_recovery_attempts: int = 2,
         execution_mode: ExecutionMode = ExecutionMode.DRY_RUN,
         audit_file: Path | None = None,
+        wait_after_execution: int = 10,
+        verification_timeout: int = 60,
     ):
 
         self.namespace = namespace
+
         self.workload = workload
-        self.max_recovery_attempts = max_recovery_attempts
+
+        self.max_recovery_attempts = (
+            max_recovery_attempts
+        )
+
+        self.wait_after_execution = (
+            wait_after_execution
+        )
+
+        self.verification_timeout = (
+            verification_timeout
+        )
 
         self.executor = RecoveryExecutor(
             mode=execution_mode
         )
 
         if audit_file is None:
+
             self.logger = AuditLogger()
+
         else:
+
             self.logger = AuditLogger(
                 audit_file=audit_file
             )
+
+
+    # -----------------------------------------------------
+    # Verification helper
+    # -----------------------------------------------------
+
+    def verify_after_recovery(
+        self,
+        node: str,
+    ):
+
+        deadline = (
+            time.monotonic()
+            + self.verification_timeout
+        )
+
+        last_result = None
+
+        while time.monotonic() < deadline:
+
+            remaining = (
+                deadline
+                - time.monotonic()
+            )
+
+            if remaining <= 0:
+                break
+
+            result = verify_recovery(
+                node_name=node,
+                namespace=self.namespace,
+                workload_name=self.workload,
+                wait_seconds=0,
+            )
+
+            last_result = result
+
+            if result.recovered:
+
+                return result
+
+            time.sleep(
+                min(2, max(0, remaining))
+            )
+
+        return last_result
+
+
+    # -----------------------------------------------------
+    # Process one node
+    # -----------------------------------------------------
 
     def process(
         self,
@@ -95,8 +185,18 @@ class RecoveryController:
 
         current_attempt = previous_attempts
 
-        execution_status = "NOT_EXECUTED"
+        execution_status = (
+            ExecutionStatus.SKIPPED.value
+            if decision.action == RecoveryAction.RECOVER
+            else "NOT_EXECUTED"
+        )
+
+        verification_status = "NOT_RUN"
+
+        final_state = "NO_ACTION"
+
         message = decision.reason
+
 
         # -------------------------------------------------
         # NO ACTION
@@ -112,9 +212,12 @@ class RecoveryController:
                 previous_attempts=previous_attempts,
                 current_attempt=current_attempt,
                 decision=decision.action.value,
-                execution_status=execution_status,
+                execution_status="NOT_EXECUTED",
+                verification_status="NOT_RUN",
+                final_state="HEALTHY",
                 message=message,
             )
+
 
         # -------------------------------------------------
         # MONITOR
@@ -130,9 +233,12 @@ class RecoveryController:
                 previous_attempts=previous_attempts,
                 current_attempt=current_attempt,
                 decision=decision.action.value,
-                execution_status=execution_status,
+                execution_status="NOT_EXECUTED",
+                verification_status="NOT_RUN",
+                final_state="MONITORING",
                 message=message,
             )
+
 
         # -------------------------------------------------
         # ESCALATE
@@ -148,9 +254,12 @@ class RecoveryController:
                 previous_attempts=previous_attempts,
                 current_attempt=current_attempt,
                 decision=decision.action.value,
-                execution_status=execution_status,
+                execution_status="NOT_EXECUTED",
+                verification_status="NOT_RUN",
+                final_state="ESCALATED",
                 message=message,
             )
+
 
         # -------------------------------------------------
         # RECOVER
@@ -158,7 +267,9 @@ class RecoveryController:
 
         if decision.action == RecoveryAction.RECOVER:
 
-            current_attempt = previous_attempts + 1
+            current_attempt = (
+                previous_attempts + 1
+            )
 
             execution = self.executor.recover_node(
                 node
@@ -170,60 +281,225 @@ class RecoveryController:
 
             message = execution.message
 
+
             # -------------------------------------------------
-            # Record the recovery attempt.
-            #
-            # In DRY_RUN mode this records that the attempt
-            # was evaluated but the command was intentionally
-            # not executed.
+            # DRY RUN
             # -------------------------------------------------
 
-            if execution_status == "EXECUTED":
-
-                verification_status = "PENDING"
-                final_state = "RECOVERY_PENDING"
-
-            else:
+            if (
+                execution.status
+                == ExecutionStatus.SKIPPED
+            ):
 
                 verification_status = "NOT_RUN"
+
                 final_state = "DRY_RUN"
 
-            self.logger.record(
+                self.logger.record(
 
-                node=node,
+                    node=node,
 
-                condition=condition,
+                    condition=condition,
 
-                confidence=confidence,
+                    confidence=confidence,
 
-                workload_healthy=workload_healthy,
+                    workload_healthy=workload_healthy,
 
-                decision=decision.action.value,
+                    decision=decision.action.value,
 
-                attempt=current_attempt,
+                    attempt=current_attempt,
 
-                action=decision.action.value,
+                    action=decision.action.value,
 
-                execution_status=execution_status,
+                    execution_status=execution_status,
 
-                verification_status=verification_status,
+                    verification_status=verification_status,
 
-                final_state=final_state,
+                    final_state=final_state,
 
-                message=message,
-            )
+                    message=message,
+                )
 
-            return ControllerResult(
-                node=node,
-                condition=condition,
-                confidence=confidence,
-                workload_healthy=workload_healthy,
-                previous_attempts=previous_attempts,
-                current_attempt=current_attempt,
-                decision=decision.action.value,
-                execution_status=execution_status,
-                message=message,
-            )
+                return ControllerResult(
+                    node=node,
+                    condition=condition,
+                    confidence=confidence,
+                    workload_healthy=workload_healthy,
+                    previous_attempts=previous_attempts,
+                    current_attempt=current_attempt,
+                    decision=decision.action.value,
+                    execution_status=execution_status,
+                    verification_status=verification_status,
+                    final_state=final_state,
+                    message=message,
+                )
+
+
+            # -------------------------------------------------
+            # EXECUTION FAILED
+            # -------------------------------------------------
+
+            if (
+                execution.status
+                == ExecutionStatus.FAILED
+            ):
+
+                verification_status = "NOT_RUN"
+
+                final_state = "EXECUTION_FAILED"
+
+                self.logger.record(
+
+                    node=node,
+
+                    condition=condition,
+
+                    confidence=confidence,
+
+                    workload_healthy=workload_healthy,
+
+                    decision=decision.action.value,
+
+                    attempt=current_attempt,
+
+                    action=decision.action.value,
+
+                    execution_status=execution_status,
+
+                    verification_status=verification_status,
+
+                    final_state=final_state,
+
+                    message=message,
+                )
+
+                return ControllerResult(
+                    node=node,
+                    condition=condition,
+                    confidence=confidence,
+                    workload_healthy=workload_healthy,
+                    previous_attempts=previous_attempts,
+                    current_attempt=current_attempt,
+                    decision=decision.action.value,
+                    execution_status=execution_status,
+                    verification_status=verification_status,
+                    final_state=final_state,
+                    message=message,
+                )
+
+
+            # -------------------------------------------------
+            # LIVE EXECUTION SUCCESS
+            # -------------------------------------------------
+
+            if (
+                execution.status
+                == ExecutionStatus.EXECUTED
+            ):
+
+                verification_status = "PENDING"
+
+                final_state = "RECOVERY_PENDING"
+
+                if self.wait_after_execution > 0:
+
+                    time.sleep(
+                        self.wait_after_execution
+                    )
+
+
+                verification = (
+                    self.verify_after_recovery(
+                        node
+                    )
+                )
+
+
+                if (
+                    verification is not None
+                    and verification.recovered
+                ):
+
+                    verification_status = (
+                        "RECOVERED"
+                    )
+
+                    final_state = "HEALTHY"
+
+                    message = (
+                        "Recovery executed successfully "
+                        "and verification confirmed that "
+                        "the node and workload are healthy. "
+                        + verification.reason
+                    )
+
+                else:
+
+                    verification_status = (
+                        "RECOVERY_FAILED"
+                    )
+
+                    final_state = (
+                        "RECOVERY_FAILED"
+                    )
+
+                    if verification is None:
+
+                        message = (
+                            "Recovery command executed, "
+                            "but verification produced "
+                            "no result before the timeout."
+                        )
+
+                    else:
+
+                        message = (
+                            "Recovery command executed, "
+                            "but post-recovery verification "
+                            "failed. "
+                            + verification.reason
+                        )
+
+
+                self.logger.record(
+
+                    node=node,
+
+                    condition=condition,
+
+                    confidence=confidence,
+
+                    workload_healthy=workload_healthy,
+
+                    decision=decision.action.value,
+
+                    attempt=current_attempt,
+
+                    action=decision.action.value,
+
+                    execution_status=execution_status,
+
+                    verification_status=verification_status,
+
+                    final_state=final_state,
+
+                    message=message,
+                )
+
+                return ControllerResult(
+                    node=node,
+                    condition=condition,
+                    confidence=confidence,
+                    workload_healthy=workload_healthy,
+                    previous_attempts=previous_attempts,
+                    current_attempt=current_attempt,
+                    decision=decision.action.value,
+                    execution_status=execution_status,
+                    verification_status=verification_status,
+                    final_state=final_state,
+                    message=message,
+                )
+
 
         # -------------------------------------------------
         # SAFETY FALLBACK
@@ -238,81 +514,120 @@ class RecoveryController:
             current_attempt=current_attempt,
             decision="ESCALATE",
             execution_status="NOT_EXECUTED",
+            verification_status="NOT_RUN",
+            final_state="ESCALATED",
             message="Unknown controller state. Recovery blocked.",
         )
 
 
-def print_result(result: ControllerResult):
+# ---------------------------------------------------------
+# Output
+# ---------------------------------------------------------
+
+def print_result(
+    result: ControllerResult,
+):
 
     print(
-        f"Node              : {result.node}"
+        f"Node              : "
+        f"{result.node}"
     )
 
     print(
-        f"Condition         : {result.condition}"
+        f"Condition         : "
+        f"{result.condition}"
     )
 
     print(
-        f"Confidence        : {result.confidence}%"
+        f"Confidence        : "
+        f"{result.confidence}%"
     )
 
     print(
-        f"Workload Healthy  : {result.workload_healthy}"
+        f"Workload Healthy  : "
+        f"{result.workload_healthy}"
     )
 
     print(
-        f"Previous Attempts : {result.previous_attempts}"
+        f"Previous Attempts : "
+        f"{result.previous_attempts}"
     )
 
     print(
-        f"Current Attempt   : {result.current_attempt}"
+        f"Current Attempt   : "
+        f"{result.current_attempt}"
     )
 
     print(
-        f"Decision           : {result.decision}"
+        f"Decision          : "
+        f"{result.decision}"
     )
 
     print(
-        f"Execution Status   : {result.execution_status}"
+        f"Execution Status  : "
+        f"{result.execution_status}"
     )
 
     print(
-        f"Message            : {result.message}"
+        f"Verification      : "
+        f"{result.verification_status}"
+    )
+
+    print(
+        f"Final State       : "
+        f"{result.final_state}"
+    )
+
+    print(
+        f"Message           : "
+        f"{result.message}"
     )
 
     print()
 
 
-
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
 
 def main():
 
     from kubernetes import client, config
     import docker
-    import yaml
 
-    from detector.evidence import collect_node_evidence
-    from detector.detector import (
-        classify_node,
+
+    print(
+        "======================================"
     )
 
-    print("======================================")
-    print(" CLOUD-138 RECOVERY CONTROLLER")
-    print("======================================")
+    print(
+        " CLOUD-138 RECOVERY CONTROLLER"
+    )
+
+    print(
+        "======================================"
+    )
+
     print()
+
 
     # -----------------------------------------------------
     # Load configuration
     # -----------------------------------------------------
 
-    config_file = GUARDIAN_DIR / "config.yaml"
+    config_file = (
+        GUARDIAN_DIR
+        / "config.yaml"
+    )
 
     with open(
         config_file,
         "r",
         encoding="utf-8",
     ) as file:
+
         cfg = yaml.safe_load(file)
+
 
     namespace = cfg.get(
         "namespace",
@@ -324,10 +639,100 @@ def main():
         "edge-workload",
     )
 
-    print(f"Config            : {config_file}")
-    print(f"Namespace         : {namespace}")
-    print(f"Workload          : {workload}")
+
+    max_recovery_attempts = int(
+        cfg.get(
+            "max_recovery_attempts",
+            2,
+        )
+    )
+
+
+    execution_mode_name = str(
+        cfg.get(
+            "execution_mode",
+            "DRY_RUN",
+        )
+    ).upper()
+
+
+    try:
+
+        execution_mode = (
+            ExecutionMode[
+                execution_mode_name
+            ]
+        )
+
+    except KeyError:
+
+        raise ValueError(
+            f"Invalid execution_mode: "
+            f"{execution_mode_name}. "
+            f"Expected one of: "
+            f"{', '.join(mode.name for mode in ExecutionMode)}"
+        )
+
+
+    recovery_config = cfg.get(
+        "recovery",
+        {},
+    )
+
+
+    wait_after_execution = int(
+        recovery_config.get(
+            "wait_after_execution",
+            10,
+        )
+    )
+
+
+    verification_timeout = int(
+        recovery_config.get(
+            "verification_timeout",
+            60,
+        )
+    )
+
+
+    print(
+        f"Config            : "
+        f"{config_file}"
+    )
+
+    print(
+        f"Namespace         : "
+        f"{namespace}"
+    )
+
+    print(
+        f"Workload          : "
+        f"{workload}"
+    )
+
+    print(
+        f"Execution Mode    : "
+        f"{execution_mode.value}"
+    )
+
+    print(
+        f"Max Recovery Attempts : "
+        f"{max_recovery_attempts}"
+    )
+
+    print(
+        f"Wait After Execution : "
+        f"{wait_after_execution}s"
+    )
+
+    print(
+        f"Verification Timeout : "
+        f"{verification_timeout}s"
+    )
+
     print()
+
 
     # -----------------------------------------------------
     # Connect to Kubernetes and Docker
@@ -336,24 +741,39 @@ def main():
     config.load_kube_config()
 
     core_api = client.CoreV1Api()
+
     apps_api = client.AppsV1Api()
 
     docker_client = docker.from_env()
+
 
     # -----------------------------------------------------
     # Read workload health
     # -----------------------------------------------------
 
-    deployment = apps_api.read_namespaced_deployment(
-        name=workload,
-        namespace=namespace,
+    deployment = (
+        apps_api.read_namespaced_deployment(
+            name=workload,
+            namespace=namespace,
+        )
     )
 
-    desired = deployment.spec.replicas or 0
-    ready = deployment.status.ready_replicas or 0
-    available = (
-        deployment.status.available_replicas or 0
+
+    desired = (
+        deployment.spec.replicas
+        or 0
     )
+
+    ready = (
+        deployment.status.ready_replicas
+        or 0
+    )
+
+    available = (
+        deployment.status.available_replicas
+        or 0
+    )
+
 
     workload_healthy = (
         desired > 0
@@ -361,32 +781,44 @@ def main():
         and available == desired
     )
 
+
     # -----------------------------------------------------
     # Find nodes hosting workload
     # -----------------------------------------------------
 
-    selector = deployment.spec.selector.match_labels
+    selector = (
+        deployment.spec.selector.match_labels
+    )
+
 
     label_selector = ",".join(
         f"{key}={value}"
-        for key, value in selector.items()
+        for key, value
+        in selector.items()
     )
 
-    pods = core_api.list_namespaced_pod(
-        namespace=namespace,
-        label_selector=label_selector,
+
+    pods = (
+        core_api.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=label_selector,
+        )
     )
+
 
     workload_nodes = set()
+
 
     for pod in pods.items:
 
         if pod.status.phase == "Running":
 
             if pod.spec.node_name:
+
                 workload_nodes.add(
                     pod.spec.node_name
                 )
+
 
     print(
         f"Workload Healthy  : "
@@ -405,24 +837,44 @@ def main():
 
     print(
         "Workload nodes     : "
-        f"{', '.join(sorted(workload_nodes)) or 'None'}"
+        + (
+            ", ".join(
+                sorted(workload_nodes)
+            )
+            or "None"
+        )
     )
 
     print()
 
+
     # -----------------------------------------------------
     # Create controller
-    #
-    # IMPORTANT:
-    # Keep DRY_RUN for this first real-cluster test.
     # -----------------------------------------------------
 
     controller = RecoveryController(
+
         namespace=namespace,
+
         workload=workload,
-        max_recovery_attempts=2,
-        execution_mode=ExecutionMode.DRY_RUN,
+
+        max_recovery_attempts=(
+            max_recovery_attempts
+        ),
+
+        execution_mode=(
+            execution_mode
+        ),
+
+        wait_after_execution=(
+            wait_after_execution
+        ),
+
+        verification_timeout=(
+            verification_timeout
+        ),
     )
+
 
     # -----------------------------------------------------
     # Collect and classify REAL nodes
@@ -430,88 +882,95 @@ def main():
 
     nodes = core_api.list_node()
 
+
     for node in nodes.items:
 
-        evidence = collect_node_evidence(
-            core_api,
-            docker_client,
-            node,
+        evidence = (
+            collect_node_evidence(
+                core_api,
+                docker_client,
+                node,
+            )
         )
 
-        detection = classify_node(
-            node_name=evidence.node_name,
-            node_ready=evidence.node_ready,
-            docker_running=evidence.runtime_running,
-            k3s_process_alive=evidence.k3s_process_alive,
-            workload_on_node=(
-                evidence.node_name
-                in workload_nodes
-            ),
-            workload_healthy=workload_healthy,
+
+        detection = (
+            classify_node(
+
+                node_name=(
+                    evidence.node_name
+                ),
+
+                node_ready=(
+                    evidence.node_ready
+                ),
+
+                docker_running=(
+                    evidence.runtime_running
+                ),
+
+                k3s_process_alive=(
+                    evidence.k3s_process_alive
+                ),
+
+                workload_on_node=(
+                    evidence.node_name
+                    in workload_nodes
+                ),
+
+                workload_healthy=(
+                    workload_healthy
+                ),
+            )
         )
+
 
         # -------------------------------------------------
-        # Send real detection result to controller
+        # Send detection result to controller
         # -------------------------------------------------
 
         result = controller.process(
-            node=evidence.node_name,
-            condition=detection.condition.value,
-            confidence=detection.confidence,
-            workload_healthy=workload_healthy,
+
+            node=(
+                evidence.node_name
+            ),
+
+            condition=(
+                detection.condition.value
+            ),
+
+            confidence=(
+                detection.confidence
+            ),
+
+            workload_healthy=(
+                workload_healthy
+            ),
         )
 
-        print(
-            f"Node              : "
-            f"{result.node}"
+
+        print_result(
+            result
         )
 
-        print(
-            f"Condition         : "
-            f"{result.condition}"
-        )
 
-        print(
-            f"Confidence        : "
-            f"{result.confidence}%"
-        )
+    print(
+        "--------------------------------------"
+    )
 
-        print(
-            f"Workload Healthy  : "
-            f"{result.workload_healthy}"
-        )
+    print(
+        " REAL CLUSTER SCAN COMPLETE"
+    )
 
-        print(
-            f"Previous Attempts : "
-            f"{result.previous_attempts}"
-        )
+    print(
+        "--------------------------------------"
+    )
 
-        print(
-            f"Current Attempt   : "
-            f"{result.current_attempt}"
-        )
 
-        print(
-            f"Decision          : "
-            f"{result.decision}"
-        )
-
-        print(
-            f"Execution Status  : "
-            f"{result.execution_status}"
-        )
-
-        print(
-            f"Message           : "
-            f"{result.message}"
-        )
-
-        print()
-
-    print("--------------------------------------")
-    print(" REAL CLUSTER SCAN COMPLETE")
-    print("--------------------------------------")
-
+# ---------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
+
     main()
