@@ -3,7 +3,7 @@ from enum import Enum
 
 from kubernetes import client, config
 
-from evidence import collect_node_evidence
+from .evidence import collect_node_evidence
 
 
 class NodeCondition(Enum):
