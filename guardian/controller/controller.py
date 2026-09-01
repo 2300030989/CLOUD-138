@@ -78,6 +78,8 @@ class RecoveryController:
         workload: str,
         max_recovery_attempts: int = 2,
         execution_mode: ExecutionMode = ExecutionMode.DRY_RUN,
+        live_recovery_enabled: bool = False,
+        recovery_session: str = "default",
         audit_file: Path | None = None,
         wait_after_execution: int = 10,
         verification_timeout: int = 60,
@@ -99,19 +101,45 @@ class RecoveryController:
             verification_timeout
         )
 
+        self.execution_mode = execution_mode
+
+        self.live_recovery_enabled = (
+            live_recovery_enabled
+        )
+
+        self.recovery_session = (
+            recovery_session
+        )
+
         self.executor = RecoveryExecutor(
             mode=execution_mode
         )
 
         if audit_file is None:
 
-            self.logger = AuditLogger()
+            self.logger = AuditLogger(
+                session=self.recovery_session
+            )
 
         else:
 
             self.logger = AuditLogger(
-                audit_file=audit_file
+                audit_file=audit_file,
+                session=self.recovery_session,
             )
+
+
+    # -----------------------------------------------------
+    # Authorization
+    # -----------------------------------------------------
+
+    def live_recovery_authorized(self) -> bool:
+
+        return (
+            self.execution_mode
+            == ExecutionMode.LIVE
+            and self.live_recovery_enabled
+        )
 
 
     # -----------------------------------------------------
@@ -173,7 +201,9 @@ class RecoveryController:
     ) -> ControllerResult:
 
         previous_attempts = (
-            self.logger.get_attempt_count(node)
+            self.logger.get_attempt_count(
+                node
+            )
         )
 
         decision = decide_recovery(
@@ -271,6 +301,70 @@ class RecoveryController:
                 previous_attempts + 1
             )
 
+
+            # -------------------------------------------------
+            # LIVE AUTHORIZATION GATE
+            # -------------------------------------------------
+
+            if (
+                self.execution_mode
+                == ExecutionMode.LIVE
+                and not self.live_recovery_enabled
+            ):
+
+                execution_status = "BLOCKED"
+
+                verification_status = "NOT_RUN"
+
+                final_state = "AUTHORIZATION_BLOCKED"
+
+                message = (
+                    "LIVE execution was requested, "
+                    "but live_recovery_enabled is false. "
+                    "Automatic recovery is blocked."
+                )
+
+                self.logger.record(
+
+                    node=node,
+
+                    condition=condition,
+
+                    confidence=confidence,
+
+                    workload_healthy=workload_healthy,
+
+                    decision=decision.action.value,
+
+                    attempt=current_attempt,
+
+                    action=decision.action.value,
+
+                    execution_status=execution_status,
+
+                    verification_status=verification_status,
+
+                    final_state=final_state,
+
+                    message=message,
+
+                )
+
+                return ControllerResult(
+                    node=node,
+                    condition=condition,
+                    confidence=confidence,
+                    workload_healthy=workload_healthy,
+                    previous_attempts=previous_attempts,
+                    current_attempt=current_attempt,
+                    decision=decision.action.value,
+                    execution_status=execution_status,
+                    verification_status=verification_status,
+                    final_state=final_state,
+                    message=message,
+                )
+
+
             execution = self.executor.recover_node(
                 node
             )
@@ -318,6 +412,7 @@ class RecoveryController:
                     final_state=final_state,
 
                     message=message,
+
                 )
 
                 return ControllerResult(
@@ -371,6 +466,7 @@ class RecoveryController:
                     final_state=final_state,
 
                     message=message,
+
                 )
 
                 return ControllerResult(
@@ -484,6 +580,7 @@ class RecoveryController:
                     final_state=final_state,
 
                     message=message,
+
                 )
 
                 return ControllerResult(
@@ -674,6 +771,22 @@ def main():
         )
 
 
+    live_recovery_enabled = bool(
+        cfg.get(
+            "live_recovery_enabled",
+            False,
+        )
+    )
+
+
+    recovery_session = str(
+        cfg.get(
+            "recovery_session",
+            "default",
+        )
+    )
+
+
     recovery_config = cfg.get(
         "recovery",
         {},
@@ -717,6 +830,16 @@ def main():
     )
 
     print(
+        f"Live Recovery     : "
+        f"{live_recovery_enabled}"
+    )
+
+    print(
+        f"Recovery Session  : "
+        f"{recovery_session}"
+    )
+
+    print(
         f"Max Recovery Attempts : "
         f"{max_recovery_attempts}"
     )
@@ -730,6 +853,47 @@ def main():
         f"Verification Timeout : "
         f"{verification_timeout}s"
     )
+
+    print()
+
+
+    # -----------------------------------------------------
+    # Authorization summary
+    # -----------------------------------------------------
+
+    if execution_mode == ExecutionMode.LIVE:
+
+        if live_recovery_enabled:
+
+            print(
+                "LIVE RECOVERY AUTHORIZATION : ENABLED"
+            )
+
+            print(
+                "Automatic recovery actions are permitted."
+            )
+
+        else:
+
+            print(
+                "LIVE RECOVERY AUTHORIZATION : BLOCKED"
+            )
+
+            print(
+                "execution_mode=LIVE but "
+                "live_recovery_enabled=false."
+            )
+
+    else:
+
+        print(
+            "LIVE RECOVERY AUTHORIZATION : "
+            "NOT REQUESTED"
+        )
+
+        print(
+            "Controller is operating in DRY_RUN mode."
+        )
 
     print()
 
@@ -864,6 +1028,14 @@ def main():
 
         execution_mode=(
             execution_mode
+        ),
+
+        live_recovery_enabled=(
+            live_recovery_enabled
+        ),
+
+        recovery_session=(
+            recovery_session
         ),
 
         wait_after_execution=(

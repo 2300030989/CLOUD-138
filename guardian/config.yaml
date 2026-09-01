@@ -4,7 +4,10 @@ workload: edge-workload
 check_interval: 5
 
 execution_mode: DRY_RUN
+live_recovery_enabled: false
 max_recovery_attempts: 2
+
+recovery_session: O5-live-recovery
 
 recovery:
   wait_after_execution: 10
