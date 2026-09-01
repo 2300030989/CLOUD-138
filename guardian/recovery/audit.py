@@ -11,8 +11,8 @@ AUDIT_FILE = BASE_DIR / "events.jsonl"
 
 @dataclass
 class RecoveryEvent:
-
     timestamp: str
+    session: str
     node: str
     condition: str
     confidence: int
@@ -31,17 +31,30 @@ class AuditLogger:
     def __init__(
         self,
         audit_file: Path = AUDIT_FILE,
+        session: str = "default",
     ):
         self.audit_file = audit_file
+        self.session = session
 
         self.audit_file.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-    def get_attempt_count(self, node: str) -> int:
+    def get_attempt_count(
+        self,
+        node: str,
+        session: Optional[str] = None,
+    ) -> int:
+
         if not self.audit_file.exists():
             return 0
+
+        target_session = (
+            session
+            if session is not None
+            else self.session
+        )
 
         attempts = 0
 
@@ -66,15 +79,27 @@ class AuditLogger:
                 if event.get("node") != node:
                     continue
 
-                if event.get("action") == "RECOVER":
-                    attempts = max(
-                        attempts,
-                        int(event.get("attempt", 0)),
+                if event.get("session") != target_session:
+                    continue
+
+                if event.get("action") != "RECOVER":
+                    continue
+
+                try:
+                    attempt = int(
+                        event.get("attempt", 0)
                     )
 
+                except (TypeError, ValueError):
+                    continue
+
+                attempts = max(
+                    attempts,
+                    attempt,
+                )
+
         return attempts
-    
-   
+
     def record(
         self,
         node: str,
@@ -88,12 +113,21 @@ class AuditLogger:
         verification_status: str,
         final_state: str,
         message: str,
+        session: Optional[str] = None,
     ):
+
+        event_session = (
+            session
+            if session is not None
+            else self.session
+        )
 
         event = RecoveryEvent(
             timestamp=datetime.now(
                 timezone.utc
             ).isoformat(),
+
+            session=event_session,
 
             node=node,
 
@@ -139,16 +173,36 @@ def main():
     print("======================================")
     print()
 
-    logger = AuditLogger()
+    session = "O5-live-recovery"
+
+    logger = AuditLogger(
+        session=session
+    )
 
     node = "k3d-cloud138-agent-0"
 
-    previous_attempts = logger.get_attempt_count(node)
+    previous_attempts = logger.get_attempt_count(
+        node=node
+    )
+
     current_attempt = previous_attempts + 1
 
-    print(f"Node              : {node}")
-    print(f"Previous attempts : {previous_attempts}")
-    print(f"Current attempt   : {current_attempt}")
+    print(
+        f"Node              : {node}"
+    )
+
+    print(
+        f"Session           : {session}"
+    )
+
+    print(
+        f"Previous attempts : {previous_attempts}"
+    )
+
+    print(
+        f"Current attempt   : {current_attempt}"
+    )
+
     print()
 
     logger.record(
@@ -187,7 +241,9 @@ def main():
 
     print()
 
-    print("Event recorded successfully.")
+    print(
+        "Event recorded successfully."
+    )
 
 
 if __name__ == "__main__":
