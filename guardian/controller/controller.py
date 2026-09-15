@@ -2,6 +2,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 
 import yaml
 
@@ -684,33 +685,10 @@ def print_result(
 
 
 # ---------------------------------------------------------
-# Main
+# Load configuration
 # ---------------------------------------------------------
 
-def main():
-
-    from kubernetes import client, config
-    import docker
-
-
-    print(
-        "======================================"
-    )
-
-    print(
-        " CLOUD-138 RECOVERY CONTROLLER"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print()
-
-
-    # -----------------------------------------------------
-    # Load configuration
-    # -----------------------------------------------------
+def load_configuration():
 
     config_file = (
         GUARDIAN_DIR
@@ -725,7 +703,6 @@ def main():
 
         cfg = yaml.safe_load(file)
 
-
     namespace = cfg.get(
         "namespace",
         "edge-lab",
@@ -736,6 +713,12 @@ def main():
         "edge-workload",
     )
 
+    check_interval = int(
+        cfg.get(
+            "check_interval",
+            5,
+        )
+    )
 
     max_recovery_attempts = int(
         cfg.get(
@@ -744,14 +727,12 @@ def main():
         )
     )
 
-
     execution_mode_name = str(
         cfg.get(
             "execution_mode",
             "DRY_RUN",
         )
     ).upper()
-
 
     try:
 
@@ -770,14 +751,12 @@ def main():
             f"{', '.join(mode.name for mode in ExecutionMode)}"
         )
 
-
     live_recovery_enabled = bool(
         cfg.get(
             "live_recovery_enabled",
             False,
         )
     )
-
 
     recovery_session = str(
         cfg.get(
@@ -786,12 +765,10 @@ def main():
         )
     )
 
-
     recovery_config = cfg.get(
         "recovery",
         {},
     )
-
 
     wait_after_execution = int(
         recovery_config.get(
@@ -800,7 +777,6 @@ def main():
         )
     )
 
-
     verification_timeout = int(
         recovery_config.get(
             "verification_timeout",
@@ -808,62 +784,95 @@ def main():
         )
     )
 
+    return {
+        "config_file": config_file,
+        "namespace": namespace,
+        "workload": workload,
+        "check_interval": check_interval,
+        "max_recovery_attempts": max_recovery_attempts,
+        "execution_mode": execution_mode,
+        "live_recovery_enabled": live_recovery_enabled,
+        "recovery_session": recovery_session,
+        "wait_after_execution": wait_after_execution,
+        "verification_timeout": verification_timeout,
+    }
+
+
+# ---------------------------------------------------------
+# Print startup configuration
+# ---------------------------------------------------------
+
+def print_startup_configuration(cfg):
 
     print(
-        f"Config            : "
-        f"{config_file}"
+        "======================================"
     )
 
     print(
-        f"Namespace         : "
-        f"{namespace}"
+        " CLOUD-138 CONTINUOUS GUARDIAN"
     )
 
     print(
-        f"Workload          : "
-        f"{workload}"
-    )
-
-    print(
-        f"Execution Mode    : "
-        f"{execution_mode.value}"
-    )
-
-    print(
-        f"Live Recovery     : "
-        f"{live_recovery_enabled}"
-    )
-
-    print(
-        f"Recovery Session  : "
-        f"{recovery_session}"
-    )
-
-    print(
-        f"Max Recovery Attempts : "
-        f"{max_recovery_attempts}"
-    )
-
-    print(
-        f"Wait After Execution : "
-        f"{wait_after_execution}s"
-    )
-
-    print(
-        f"Verification Timeout : "
-        f"{verification_timeout}s"
+        "======================================"
     )
 
     print()
 
+    print(
+        f"Config            : "
+        f"{cfg['config_file']}"
+    )
 
-    # -----------------------------------------------------
-    # Authorization summary
-    # -----------------------------------------------------
+    print(
+        f"Namespace         : "
+        f"{cfg['namespace']}"
+    )
 
-    if execution_mode == ExecutionMode.LIVE:
+    print(
+        f"Workload          : "
+        f"{cfg['workload']}"
+    )
 
-        if live_recovery_enabled:
+    print(
+        f"Check Interval    : "
+        f"{cfg['check_interval']}s"
+    )
+
+    print(
+        f"Execution Mode    : "
+        f"{cfg['execution_mode'].value}"
+    )
+
+    print(
+        f"Live Recovery     : "
+        f"{cfg['live_recovery_enabled']}"
+    )
+
+    print(
+        f"Recovery Session  : "
+        f"{cfg['recovery_session']}"
+    )
+
+    print(
+        f"Max Recovery Attempts : "
+        f"{cfg['max_recovery_attempts']}"
+    )
+
+    print(
+        f"Wait After Execution : "
+        f"{cfg['wait_after_execution']}s"
+    )
+
+    print(
+        f"Verification Timeout : "
+        f"{cfg['verification_timeout']}s"
+    )
+
+    print()
+
+    if cfg["execution_mode"] == ExecutionMode.LIVE:
+
+        if cfg["live_recovery_enabled"]:
 
             print(
                 "LIVE RECOVERY AUTHORIZATION : ENABLED"
@@ -892,23 +901,56 @@ def main():
         )
 
         print(
-            "Controller is operating in DRY_RUN mode."
+            "Guardian is operating in DRY_RUN mode."
         )
 
     print()
 
+    print(
+        "Continuous monitoring is ENABLED."
+    )
 
-    # -----------------------------------------------------
-    # Connect to Kubernetes and Docker
-    # -----------------------------------------------------
+    print(
+        "Press Ctrl+C to stop the Guardian."
+    )
 
-    config.load_kube_config()
+    print()
 
-    core_api = client.CoreV1Api()
 
-    apps_api = client.AppsV1Api()
+# ---------------------------------------------------------
+# Run one monitoring cycle
+# ---------------------------------------------------------
 
-    docker_client = docker.from_env()
+def run_scan_cycle(
+    controller,
+    core_api,
+    apps_api,
+    docker_client,
+    namespace,
+    workload,
+    cycle_number,
+):
+
+    cycle_start = datetime.now().astimezone()
+
+    print()
+    print(
+        "======================================"
+    )
+
+    print(
+        f" GUARDIAN CYCLE {cycle_number}"
+    )
+
+    print(
+        f" Time: {cycle_start.strftime('%Y-%m-%d %H:%M:%S %z')}"
+    )
+
+    print(
+        "======================================"
+    )
+
+    print()
 
 
     # -----------------------------------------------------
@@ -921,7 +963,6 @@ def main():
             namespace=namespace,
         )
     )
-
 
     desired = (
         deployment.spec.replicas
@@ -938,7 +979,6 @@ def main():
         or 0
     )
 
-
     workload_healthy = (
         desired > 0
         and ready == desired
@@ -954,13 +994,11 @@ def main():
         deployment.spec.selector.match_labels
     )
 
-
     label_selector = ",".join(
         f"{key}={value}"
         for key, value
         in selector.items()
     )
-
 
     pods = (
         core_api.list_namespaced_pod(
@@ -969,9 +1007,7 @@ def main():
         )
     )
 
-
     workload_nodes = set()
-
 
     for pod in pods.items:
 
@@ -995,7 +1031,7 @@ def main():
     )
 
     print(
-        f"Available          : "
+        f"Available         : "
         f"{available}/{desired}"
     )
 
@@ -1013,47 +1049,10 @@ def main():
 
 
     # -----------------------------------------------------
-    # Create controller
-    # -----------------------------------------------------
-
-    controller = RecoveryController(
-
-        namespace=namespace,
-
-        workload=workload,
-
-        max_recovery_attempts=(
-            max_recovery_attempts
-        ),
-
-        execution_mode=(
-            execution_mode
-        ),
-
-        live_recovery_enabled=(
-            live_recovery_enabled
-        ),
-
-        recovery_session=(
-            recovery_session
-        ),
-
-        wait_after_execution=(
-            wait_after_execution
-        ),
-
-        verification_timeout=(
-            verification_timeout
-        ),
-    )
-
-
-    # -----------------------------------------------------
     # Collect and classify REAL nodes
     # -----------------------------------------------------
 
     nodes = core_api.list_node()
-
 
     for node in nodes.items:
 
@@ -1064,7 +1063,6 @@ def main():
                 node,
             )
         )
-
 
         detection = (
             classify_node(
@@ -1120,7 +1118,6 @@ def main():
             ),
         )
 
-
         print_result(
             result
         )
@@ -1131,12 +1128,178 @@ def main():
     )
 
     print(
-        " REAL CLUSTER SCAN COMPLETE"
+        f" CYCLE {cycle_number} COMPLETE"
     )
 
     print(
         "--------------------------------------"
     )
+
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+
+def main():
+
+    cfg = load_configuration()
+
+    print_startup_configuration(
+        cfg
+    )
+
+
+    from kubernetes import client, config
+    import docker
+
+
+    # -----------------------------------------------------
+    # Connect to Kubernetes and Docker
+    # -----------------------------------------------------
+
+    config.load_kube_config()
+
+    core_api = client.CoreV1Api()
+
+    apps_api = client.AppsV1Api()
+
+    docker_client = docker.from_env()
+
+
+    # -----------------------------------------------------
+    # Create controller
+    # -----------------------------------------------------
+
+    controller = RecoveryController(
+
+        namespace=cfg["namespace"],
+
+        workload=cfg["workload"],
+
+        max_recovery_attempts=(
+            cfg["max_recovery_attempts"]
+        ),
+
+        execution_mode=(
+            cfg["execution_mode"]
+        ),
+
+        live_recovery_enabled=(
+            cfg["live_recovery_enabled"]
+        ),
+
+        recovery_session=(
+            cfg["recovery_session"]
+        ),
+
+        wait_after_execution=(
+            cfg["wait_after_execution"]
+        ),
+
+        verification_timeout=(
+            cfg["verification_timeout"]
+        ),
+    )
+
+
+    # -----------------------------------------------------
+    # Continuous Guardian loop
+    # -----------------------------------------------------
+
+    cycle_number = 1
+
+    try:
+
+        while True:
+
+            try:
+
+                run_scan_cycle(
+
+                    controller=controller,
+
+                    core_api=core_api,
+
+                    apps_api=apps_api,
+
+                    docker_client=docker_client,
+
+                    namespace=cfg["namespace"],
+
+                    workload=cfg["workload"],
+
+                    cycle_number=cycle_number,
+                )
+
+            except Exception as exc:
+
+                print()
+                print(
+                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                )
+
+                print(
+                    " GUARDIAN CYCLE ERROR"
+                )
+
+                print(
+                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                )
+
+                print(
+                    f"Cycle   : {cycle_number}"
+                )
+
+                print(
+                    f"Error   : {exc}"
+                )
+
+                print(
+                    "Recovery actions for this failed "
+                    "cycle were not performed."
+                )
+
+                print()
+
+
+            cycle_number += 1
+
+            print(
+                f"Next scan in "
+                f"{cfg['check_interval']} seconds..."
+            )
+
+            time.sleep(
+                cfg["check_interval"]
+            )
+
+
+    except KeyboardInterrupt:
+
+        print()
+        print(
+            "======================================"
+        )
+
+        print(
+            " CLOUD-138 GUARDIAN STOPPED"
+        )
+
+        print(
+            "======================================"
+        )
+
+        print(
+            f"Completed cycles: "
+            f"{cycle_number - 1}"
+        )
+
+        print(
+            "Continuous monitoring terminated "
+            "by operator."
+        )
+
+        print()
 
 
 # ---------------------------------------------------------
