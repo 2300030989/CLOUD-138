@@ -7,7 +7,7 @@ execution_mode: LIVE
 live_recovery_enabled: true
 max_recovery_attempts: 2
 
-recovery_session: O6-final-live
+recovery_session: O6-continuous-guardian
 
 recovery:
   wait_after_execution: 10
