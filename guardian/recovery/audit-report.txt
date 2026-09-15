@@ -1,0 +1,70 @@
+============================================================
+              CLOUD-138 RECOVERY AUDIT REPORT
+============================================================
+
+Recovery Session : O5-live-recovery
+Primary Node     : k3d-cloud138-agent-0
+
+Purpose
+------------------------------------------------------------
+This report presents the human-readable recovery history
+for the selected CLOUD-138 recovery session.
+
+SESSION SUMMARY
+------------------------------------------------------------
+Total Events      : 1
+Executed Actions  : 1
+Successful        : 1
+Failed            : 0
+
+
+------------------------------------------------------------
+RECOVERY EVENT #1
+------------------------------------------------------------
+
+Timestamp          : 01-Sep-2026 05:15:47 UTC
+Node               : k3d-cloud138-agent-0
+Failure Condition  : FAILED
+Confidence         : 95%
+Workload Healthy   : YES
+
+Recovery Decision
+------------------------------------------------------------
+Decision           : RECOVER
+Recovery Attempt   : 1
+Action             : RECOVER
+
+Execution & Verification
+------------------------------------------------------------
+Execution Status   : EXECUTED
+Verification       : RECOVERED
+Final State        : HEALTHY
+Overall Result     : SUCCESS
+
+Event Message
+------------------------------------------------------------
+Recovery executed successfully and verification confirmed that the node and workload are healthy. Recovery verified successfully: Docker runtime is running, K3s process is alive, Kubernetes reports the node Ready, and the workload is healthy.
+
+
+============================================================
+                     FINAL RESULT
+============================================================
+
+Session           : O5-live-recovery
+Node              : k3d-cloud138-agent-0
+Latest Attempt    : 1
+Condition         : FAILED
+Decision          : RECOVER
+Execution         : EXECUTED
+Verification      : RECOVERED
+Final State       : HEALTHY
+
+Recovery Status   : SUCCESS
+
+The failed node was automatically recovered.
+The recovery command executed successfully.
+Post-recovery verification confirmed that the
+Docker runtime, K3s process, Kubernetes node, and
+workload returned to a healthy state.
+
+============================================================
